@@ -1,0 +1,6 @@
+{
+  "name": "Mi TV Remote",
+  "description": "100% offline Bluetooth HID and IR Blaster remote control for Xiaomi Mi TV, Android TV, Google TV, and PatchWall.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
