@@ -15,7 +15,7 @@ Each version has its own file name, e.g. `MiTVRemote-v1.0.0.apk`. A newer versio
 
 1. Install the APK and open it. Allow the Bluetooth permissions.
 2. On the TV: **Settings → Remotes & Accessories → Add accessory**.
-3. In the app tap **Direct Connect**. For 2 minutes the phone shows up on the TV like a Bluetooth remote (Bluetooth Low Energy, the same kind of link the official Mi remote uses). Pick it on the TV and confirm pairing on both sides.
+3. In the app tap **Direct Connect**. For 2 minutes the phone shows up on the TV as **"MI RC"**, like the official remote (the phone's Bluetooth name is switched back afterwards) (Bluetooth Low Energy, the same kind of link the official Mi remote uses). Pick it on the TV and confirm pairing on both sides.
 4. This is needed only once. Afterwards the TV reconnects by itself when the app is open and you press a button.
 5. If the TV does not list the phone, tap **"TV वर फोन दिसत नाही?"** in the pairing window. The phone then becomes visible to classic Bluetooth for 2 minutes.
 
@@ -27,6 +27,7 @@ With the TV in standby (mains switch on, TV off), open the app and press **Power
 
 | Version | What it does |
 |---|---|
+| 1.2.0 | Looks like the official remote: advertises as "MI RC" while pairing; Power sends the remote's wake packet (as close as Android allows) and knocks on the TV's address |
 | 1.1.0 | Bluetooth LE remote (pair once, auto-reconnect), Power-on from standby experiment, Marathi pairing help |
 | 1.0.0 | Bluetooth remote, Bluetooth / IR mode switch, Power sends one signal only |
 

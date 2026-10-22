@@ -63,6 +63,7 @@ class BluetoothRemoteController(private val context: Context) {
         private const val PAIRING_WINDOW_MS = 120_000L
         private const val RECONNECT_WINDOW_MS = 30_000L
         private const val WAKE_WINDOW_MS = 45_000L
+        private const val WAKE_BURST_MS = 10_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -128,7 +129,7 @@ class BluetoothRemoteController(private val context: Context) {
         }
     }
 
-    private val ble = BleHidPeripheral(context, bleListener)
+    private val ble = BleHidPeripheral(context, bleListener).also { it.restoreOriginalName() }
 
     /** True when a TV is linked over Bluetooth LE. */
     val isBleLinked: Boolean get() = ble.isHostConnected
@@ -490,6 +491,10 @@ class BluetoothRemoteController(private val context: Context) {
                 ble.sendKey(HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.CONSUMER_SYSTEM_WAKE)
                 _lastActionLog.value = "TV reconnected • wake-up sent"
             }
+            // 1) the official remote's "power" advertisement, 2) knock on the TV's address,
+            // 3) stay reconnectable so the TV can link up once it is awake.
+            ble.startWakeBurst(WAKE_BURST_MS)
+            ble.savedHostAddress?.let { ble.knockOnTv(it) }
             ble.startAdvertising(WAKE_WINDOW_MS)
             _connectionState.value = HidConnectionState.Connecting("TV", ble.savedHostAddress ?: "")
             _lastActionLog.value = "Power • calling the TV over Bluetooth LE…"

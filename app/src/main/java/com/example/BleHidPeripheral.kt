@@ -57,6 +57,16 @@ class BleHidPeripheral(private val context: Context, private val listener: Liste
         private const val TAG = "BleHidPeripheral"
         private const val PREFS = "mi_tv_remote_prefs"
         private const val KEY_HOST = "ble_host_address"
+        private const val KEY_ORIGINAL_NAME = "original_bt_name"
+
+        /** Name the official Xiaomi Bluetooth remote advertises. */
+        const val MI_REMOTE_NAME = "MI RC"
+
+        // Manufacturer field seen in the official remote's advertisement ("03 FF 00 01" on a
+        // power press, "03 FF 00 00" on other keys). Android writes the 16-bit id little endian,
+        // so id 0x0100 with no payload gives exactly "FF 00 01".
+        private const val MI_MFG_POWER = 0x0100
+        private const val MI_MFG_IDLE = 0x0000
 
         private fun uuid16(v: Int): UUID =
             UUID.fromString(String.format("%08x-0000-1000-8000-00805f9b34fb", v))
@@ -421,7 +431,10 @@ class BleHidPeripheral(private val context: Context, private val listener: Liste
      * Advertises as a connectable HID device for [durationMs]. A TV in "Add accessory" will list
      * the phone; a TV that bonded with us before reconnects by itself.
      */
+    @Volatile private var advertiseUntil = 0L
+
     fun startAdvertising(durationMs: Long) {
+        advertiseUntil = System.currentTimeMillis() + durationMs
         advertiseStopJob?.cancel()
         advertiseStopJob = scope.launch {
             delay(durationMs)
@@ -457,10 +470,14 @@ class BleHidPeripheral(private val context: Context, private val listener: Liste
             .setConnectable(true)
             .setTimeout(0)
             .build()
+        // Advertise under the official remote's name so the TV's own remote-pairing screen has
+        // the best chance to recognise us.
+        useMiRemoteName(advertiseUntil)
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(SERVICE_HID))
+            .addManufacturerData(MI_MFG_IDLE, ByteArray(0))
             .build()
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(true)
@@ -476,9 +493,159 @@ class BleHidPeripheral(private val context: Context, private val listener: Liste
         }
     }
 
+    // ---------------------------------------------------------------- standby wake
+
+    private val wakeCallback = object : AdvertiseCallback() {
+        override fun onStartFailure(errorCode: Int) {
+            Log.w(TAG, "wake burst failed: $errorCode")
+        }
+    }
+
+    /**
+     * Sends the official remote's "power pressed" advertisement for [durationMs]: name "MI RC",
+     * HID service, manufacturer field FF 00 01, TX power. Non-connectable, like the remote.
+     *
+     * Limit: Xiaomi TVs only accept this from the remote's own Bluetooth address, and a normal
+     * Android app cannot choose its address. It can still work on TVs that also accept the
+     * phone's address, so it is worth trying.
+     */
+    fun startWakeBurst(durationMs: Long) {
+        worker.execute {
+            val adapter = manager?.adapter ?: return@execute
+            val advertiser = adapter.bluetoothLeAdvertiser ?: return@execute
+            useMiRemoteName(System.currentTimeMillis() + durationMs)
+            val settings = AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                .setConnectable(false)
+                .setTimeout(0)
+                .build()
+            val data = AdvertiseData.Builder()
+                .setIncludeDeviceName(true)
+                .setIncludeTxPowerLevel(true)
+                .addServiceUuid(ParcelUuid(SERVICE_HID))
+                .addManufacturerData(MI_MFG_POWER, ByteArray(0))
+                .build()
+            try {
+                advertiser.stopAdvertising(wakeCallback)
+                advertiser.startAdvertising(settings, data, wakeCallback)
+            } catch (e: Exception) {
+                Log.w(TAG, "wake burst error", e)
+                return@execute
+            }
+            scope.launch {
+                delay(durationMs)
+                worker.execute {
+                    try {
+                        advertiser.stopAdvertising(wakeCallback)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "stop wake burst error", e)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Knocks on the TV's door: opens a classic Bluetooth link (SDP query) and an LE connection
+     * to the TV's address. Some Xiaomi boxes wake up from deep sleep when a known device asks
+     * to connect. Harmless when the TV ignores it.
+     */
+    fun knockOnTv(address: String) {
+        worker.execute {
+            val adapter = manager?.adapter ?: return@execute
+            val device = try {
+                adapter.getRemoteDevice(address)
+            } catch (e: Exception) {
+                return@execute
+            }
+            try {
+                device.fetchUuidsWithSdp()
+            } catch (e: Exception) {
+                Log.w(TAG, "SDP knock failed", e)
+            }
+            try {
+                val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    device.connectGatt(context, false, object : android.bluetooth.BluetoothGattCallback() {},
+                        BluetoothDevice.TRANSPORT_LE)
+                } else {
+                    device.connectGatt(context, false, object : android.bluetooth.BluetoothGattCallback() {})
+                }
+                scope.launch {
+                    delay(8000L)
+                    worker.execute {
+                        try {
+                            gatt?.disconnect()
+                            gatt?.close()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "close knock failed", e)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "LE knock failed", e)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- phone name
+
+    @Volatile private var nameUntil = 0L
+    private var restoreNameJob: Job? = null
+
+    /**
+     * Shows the phone as "MI RC" until [untilMs], then puts the user's own name back.
+     * The original name is kept in preferences so it can be restored even after a crash.
+     * Runs on the worker thread.
+     */
+    private fun useMiRemoteName(untilMs: Long) {
+        val adapter = manager?.adapter ?: return
+        try {
+            val current = adapter.name
+            if (current != MI_REMOTE_NAME && prefs.getString(KEY_ORIGINAL_NAME, null) == null) {
+                prefs.edit().putString(KEY_ORIGINAL_NAME, current).apply()
+            }
+            if (current != MI_REMOTE_NAME) {
+                adapter.setName(MI_REMOTE_NAME)
+                var waited = 0
+                while (adapter.name != MI_REMOTE_NAME && waited < 1500) {
+                    Thread.sleep(50)
+                    waited += 50
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "rename failed", e)
+            return
+        }
+        if (untilMs > nameUntil) nameUntil = untilMs
+        scope.launch {
+            restoreNameJob?.cancel()
+            restoreNameJob = scope.launch {
+                while (System.currentTimeMillis() < nameUntil) delay(1000L)
+                restoreOriginalName()
+            }
+        }
+    }
+
+    /** Puts the phone's own Bluetooth name back (safe to call any time). */
+    fun restoreOriginalName() {
+        worker.execute {
+            val original = prefs.getString(KEY_ORIGINAL_NAME, null) ?: return@execute
+            try {
+                val adapter = manager?.adapter ?: return@execute
+                if (adapter.name == MI_REMOTE_NAME) adapter.setName(original)
+                prefs.edit().remove(KEY_ORIGINAL_NAME).apply()
+            } catch (e: Exception) {
+                Log.w(TAG, "restore name failed", e)
+            }
+        }
+    }
+
     fun stopAdvertising() {
         advertiseStopJob?.cancel()
         advertiseStopJob = null
+        advertiseUntil = 0L
+        nameUntil = minOf(nameUntil, System.currentTimeMillis())
         if (!advertising) return
         advertising = false
         listener.onAdvertisingChanged(false)
@@ -539,6 +706,7 @@ class BleHidPeripheral(private val context: Context, private val listener: Liste
 
     fun release() {
         stopAdvertising()
+        restoreOriginalName()
         val server = gattServer
         gattServer = null
         hostDevice = null
