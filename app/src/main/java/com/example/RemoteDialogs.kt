@@ -51,6 +51,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -86,35 +87,21 @@ import com.example.ui.theme.TextPrimaryWhite
 import com.example.ui.theme.TextSecondarySlate
 
 /**
- * Fullscreen Direct Pairing Radar Overlay showing authentic Mi TV pairing beacon status.
+ * "Find your TV": searches for nearby Bluetooth devices, lists TVs first and pairs on tap.
  */
 @Composable
-fun DirectPairingOverlay(
-    onDismiss: () -> Unit,
-    onClassicPairing: () -> Unit = {}
+fun FindTvDialog(
+    devices: List<PairedTvDevice>,
+    isScanning: Boolean,
+    status: String,
+    connectedAddress: String?,
+    onSearchAgain: () -> Unit,
+    onPick: (PairedTvDevice) -> Unit,
+    onOpenBluetoothSettings: () -> Unit,
+    onDismiss: () -> Unit
 ) {
     val palette = LocalRemotePalette.current
     val accentColor = MaterialTheme.colorScheme.primary
-
-    val infiniteTransition = rememberInfiniteTransition(label = "beacon")
-    val pulseRadius by infiniteTransition.animateFloat(
-        initialValue = 20f,
-        targetValue = 90f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "pulseRadius"
-    )
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.8f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "pulseAlpha"
-    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -133,7 +120,7 @@ fun DirectPairingOverlay(
                     tint = accentColor
                 )
                 Text(
-                    text = "TV शी जोडा",
+                    text = stringResource(R.string.find_tv_title),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -142,66 +129,105 @@ fun DirectPairingOverlay(
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Box(
-                    modifier = Modifier.size(130.dp),
-                    contentAlignment = Alignment.Center
+                Text(
+                    text = stringResource(R.string.find_tv_steps),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondarySlate
+                )
+                if (isScanning) {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = accentColor
+                    )
+                }
+                if (status.isNotBlank()) {
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = accentColor
+                    )
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(190.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val center = Offset(size.width / 2f, size.height / 2f)
-                        drawCircle(
-                            color = accentColor.copy(alpha = pulseAlpha),
-                            radius = pulseRadius.dp.toPx(),
-                            center = center
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .size(68.dp)
-                            .clip(CircleShape)
-                            .background(accentColor),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Tv,
-                            contentDescription = null,
-                            tint = ObsidianBackground,
-                            modifier = Modifier.size(36.dp)
-                        )
+                    items(devices, key = { it.address }) { item ->
+                        val isConnected = item.address == connectedAddress
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onPick(item) },
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (isConnected) accentColor.copy(alpha = 0.18f) else palette.buttonSurface,
+                            border = BorderStroke(1.dp, if (item.isLikelyTv) accentColor else palette.buttonBorder)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (item.isLikelyTv) Icons.Default.Tv else Icons.Default.Bluetooth,
+                                    contentDescription = null,
+                                    tint = if (item.isLikelyTv) accentColor else TextSecondarySlate
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.name,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = TextPrimaryWhite
+                                    )
+                                    Text(
+                                        text = when {
+                                            isConnected -> "Connected"
+                                            item.isLikelyTv && item.isBonded -> "Likely your TV • paired"
+                                            item.isLikelyTv -> "Likely your TV"
+                                            item.isBonded -> "Paired"
+                                            else -> "Nearby device"
+                                        },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = TextSecondarySlate
+                                    )
+                                }
+                                if (isConnected) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Connected",
+                                        tint = accentColor
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
-
-                Text(
-                    text = stringResource(R.string.direct_connect_hint),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextPrimaryWhite,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    text = stringResource(R.string.dual_button_pair_tooltip),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = accentColor,
-                    textAlign = TextAlign.Center
-                )
+                TextButton(onClick = onOpenBluetoothSettings) {
+                    Text(stringResource(R.string.find_tv_open_settings), color = TextSecondarySlate)
+                }
             }
         },
         confirmButton = {
             Button(
-                onClick = onDismiss,
+                onClick = onSearchAgain,
+                enabled = !isScanning,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = accentColor,
                     contentColor = ObsidianBackground
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Text("ठीक")
+                Text(stringResource(R.string.find_tv_search_again))
             }
         },
         dismissButton = {
-            TextButton(onClick = onClassicPairing) {
-                Text("TV वर फोन दिसत नाही?", color = TextSecondarySlate)
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.dialog_close), color = TextSecondarySlate)
             }
         }
     )
@@ -285,13 +311,13 @@ fun DeviceSelectionBottomSheet(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "Instant Direct Pairing (Mi TV)",
+                        text = "Pairing",
                         style = MaterialTheme.typography.titleSmall,
                         color = accentColor,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Just tap 'Direct Connect' or hold the PatchWall (Mi) + Home buttons while holding the phone near your TV bottom-right (within 20cm). The TV connects automatically!",
+                        text = "Tap 'Find TV' on the main screen. The app searches for your TV and pairs with it.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondarySlate
                     )
@@ -307,7 +333,7 @@ fun DeviceSelectionBottomSheet(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "No paired devices found. Tap 'Direct Connect' or open Bluetooth settings.",
+                        text = "No paired devices found. Tap 'Find TV' on the main screen.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondarySlate,
                         textAlign = TextAlign.Center
@@ -472,7 +498,7 @@ fun QuickKeyboardDialog(
                     text = if (isBtConnected) {
                         "Type below to send keystrokes to TV via Bluetooth HID."
                     } else {
-                        "Direct Connect to your Mi TV first so keystrokes reach the TV."
+                        "Pair your TV first (tap 'Find TV') so keystrokes reach the TV."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (isBtConnected) TextSecondarySlate else StatusIrAmber

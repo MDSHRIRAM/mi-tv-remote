@@ -13,8 +13,13 @@
    - Not verified on a real TV yet. Emulator: pairing advertising starts fine, no crash.
    - If the TV lists the phone but refuses it, or does not wake: next ideas are adding the Appearance "remote control" via a different advertising API, and copying the official remote's advertising format (needs the TV model).
 2b. **v1.2.0 — look like the official remote.** Pairing advertises as "MI RC" (phone Bluetooth name switched for the pairing window, restored after; original kept in prefs) with manufacturer field FF 00 00. Power with the TV not linked: 10 s non-connectable "power press" burst (MI RC + HID UUID + FF 00 01 + TX power), plus a "knock" on the TV's address (SDP query + LE connect, the Mi Box trick), plus 45 s reconnect advertising.
+2c. **v1.3.0 - pair from the phone (2026-10-22).** Owner test of v1.2.0 on the TV (MiTV-AXS01, Android 9): the TV's Add accessory never listed the phone (BLE or classic), and the app auto-picked the wrong device (earbuds). But the phone's own Bluetooth settings found "Mayur tv" and paired. So: "Find TV" now scans from the app, lists TVs first (TV/set-top/monitor class or name TV/Mi/Xiaomi, never headsets), pairs on tap and auto-pairs if exactly one TV is found, then connects classic HID. BLE advertising / "MI RC" rename is no longer started by default. App text is English only (owner request). Still to do: new UI (owner dislikes the current one), IR codes.
 3. Correct Xiaomi IR codes (current codes are LG NEC codes and will not work on Mi TV) + a "find my TV" screen to try code sets.
 4. Test on other Android TVs, final release.
+
+## Test results
+- Owner TV: MiTV-AXS01, Android 9, patch Aug 2021, BT address e4:db:6d:1e:0a:47, serial 19070104..., named "Mayur tv". Phone: OnePlus 15R.
+- v1.2.0: TV Add accessory shows nothing for the phone; phone-side classic pairing works (pairing code dialog appeared). Phone IR blaster apps did not work either (code set unknown).
 
 ## Facts found
 - The current Bluetooth path is Classic Bluetooth HID (`BluetoothHidDevice`, Android 9+). It cannot wake a TV from standby.

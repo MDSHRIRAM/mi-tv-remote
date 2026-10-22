@@ -10,7 +10,10 @@ import android.bluetooth.BluetoothHidDeviceAppQosSettings
 import android.bluetooth.BluetoothHidDeviceAppSdpSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
@@ -41,7 +44,8 @@ data class PairedTvDevice(
     val name: String,
     val address: String,
     val isLikelyTv: Boolean,
-    val rawDevice: BluetoothDevice
+    val rawDevice: BluetoothDevice,
+    val isBonded: Boolean = true
 )
 
 /**
@@ -64,6 +68,7 @@ class BluetoothRemoteController(private val context: Context) {
         private const val RECONNECT_WINDOW_MS = 30_000L
         private const val WAKE_WINDOW_MS = 45_000L
         private const val WAKE_BURST_MS = 10_000L
+        private val TV_NAME = Regex("(?i)(\\btv\\b|tv$|\\bmi\\b|xiaomi|redmi|patchwall|bravia)")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -138,33 +143,19 @@ class BluetoothRemoteController(private val context: Context) {
     val hasBleTv: Boolean get() = ble.savedHostAddress != null
 
     /**
-     * Pairing mode: the phone advertises as a Bluetooth remote for 2 minutes. On the TV open
-     * Settings → Remotes & Accessories → Add accessory and pick the phone. A TV that paired
-     * before reconnects by itself.
+     * Opens the "Find your TV" flow: scans for nearby Bluetooth devices, lists TVs first and
+     * pairs from the phone side (the way phone-remote apps work with Android TV).
      */
     fun startDirectTvConnect() {
         if (!hasBluetoothPermission()) return
         initialize()
-        if (ble.isHostConnected) {
-            _lastActionLog.value = "Already connected"
-            return
-        }
-        ble.startAdvertising(PAIRING_WINDOW_MS)
         _isDirectPairingActive.value = true
-        _lastActionLog.value = "Pairing on • TV: Remotes & Accessories → Add accessory"
-        scope.launch {
-            delay(PAIRING_WINDOW_MS)
-            _isDirectPairingActive.value = false
-        }
-        // A TV paired earlier over classic Bluetooth can still be linked that way.
-        val classicAddr = prefs.getString(KEY_LAST_DEVICE_ADDRESS, null)
-        val classicTarget = _pairedDevices.value.firstOrNull { it.address == classicAddr }?.rawDevice
-        if (classicTarget != null && connectedDevice == null) connectToDevice(classicTarget)
+        startScan()
     }
 
     fun dismissDirectPairing() {
         _isDirectPairingActive.value = false
-        if (!ble.isHostConnected) ble.stopAdvertising()
+        stopScan()
     }
 
     /** A button was pressed while no TV is linked: call the known TV back. */
@@ -216,7 +207,7 @@ class BluetoothRemoteController(private val context: Context) {
                     val savedAddr = prefs.getString(KEY_LAST_DEVICE_ADDRESS, null)
                     val autoTarget = pluggedDevice
                         ?: _pairedDevices.value.firstOrNull { it.address == savedAddr }?.rawDevice
-                        ?: _pairedDevices.value.firstOrNull { it.isLikelyTv }?.rawDevice
+                        ?: _pairedDevices.value.singleOrNull { it.isLikelyTv }?.rawDevice
 
                     if (autoTarget != null) {
                         lastTargetDevice = autoTarget
@@ -242,6 +233,9 @@ class BluetoothRemoteController(private val context: Context) {
                         }
                         _connectionState.value = HidConnectionState.Connected(safeName, safeAddr)
                         _lastActionLog.value = "Connected to $safeName via Bluetooth HID"
+                        pendingPairAddress = null
+                        _pairingStatus.value = "Connected to $safeName"
+                        _isDirectPairingActive.value = false
                     }
                     BluetoothProfile.STATE_CONNECTING -> {
                         if (ble.isHostConnected) return
@@ -303,8 +297,6 @@ class BluetoothRemoteController(private val context: Context) {
         // BLE remote (works from Android 5). If a TV paired before, let it reconnect.
         if (hasBleTv && !ble.isHostConnected && !_isBleAdvertising.value) {
             ble.startAdvertising(RECONNECT_WINDOW_MS)
-        } else {
-            ble.start()
         }
         // Classic Bluetooth remote needs Android 9.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
@@ -352,22 +344,7 @@ class BluetoothRemoteController(private val context: Context) {
         val adapter = bluetoothAdapter ?: return
         try {
             val bonded = adapter.bondedDevices.orEmpty()
-            val mapped = bonded.map { device ->
-                val name = resolveDeviceName(device)
-                val majorClass = device.bluetoothClass?.majorDeviceClass
-                val isAvDevice = majorClass == BluetoothClass.Device.Major.AUDIO_VIDEO
-                val isTvName = name.contains("Mi", ignoreCase = true) ||
-                    name.contains("Xiaomi", ignoreCase = true) ||
-                    name.contains("TV", ignoreCase = true) ||
-                    name.contains("PatchWall", ignoreCase = true) ||
-                    name.contains("Box", ignoreCase = true)
-                PairedTvDevice(
-                    name = name,
-                    address = device.address,
-                    isLikelyTv = isAvDevice || isTvName,
-                    rawDevice = device
-                )
-            }.sortedWith(
+            val mapped = bonded.map { device -> toListItem(device, bonded = true) }.sortedWith(
                 compareByDescending<PairedTvDevice> { it.isLikelyTv }
                     .thenBy { it.name.lowercase() }
             )
@@ -376,8 +353,7 @@ class BluetoothRemoteController(private val context: Context) {
             if (lastTargetDevice == null) {
                 val savedAddr = prefs.getString(KEY_LAST_DEVICE_ADDRESS, null)
                 lastTargetDevice = mapped.firstOrNull { it.address == savedAddr }?.rawDevice
-                    ?: mapped.firstOrNull { it.isLikelyTv }?.rawDevice
-                    ?: mapped.firstOrNull()?.rawDevice
+                    ?: mapped.singleOrNull { it.isLikelyTv }?.rawDevice
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to query bonded Bluetooth devices", e)
@@ -653,6 +629,182 @@ class BluetoothRemoteController(private val context: Context) {
         _lastActionLog.value = message
     }
 
+    // ------------------------------------------------------------ find & pair a TV
+
+    private val _foundDevices = MutableStateFlow<List<PairedTvDevice>>(emptyList())
+    val foundDevices: StateFlow<List<PairedTvDevice>> = _foundDevices.asStateFlow()
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+
+    private val _pairingStatus = MutableStateFlow("")
+    val pairingStatus: StateFlow<String> = _pairingStatus.asStateFlow()
+
+    private var pendingPairAddress: String? = null
+    private var userPicked = false
+    private var receiverRegistered = false
+
+    private val scanReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            intent ?: return
+            when (intent.action) {
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device = intent.device() ?: return
+                    addFound(toListItem(device, bonded = device.bondState == BluetoothDevice.BOND_BONDED))
+                }
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                    _isScanning.value = false
+                    autoPickSingleTv()
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    val device = intent.device() ?: return
+                    if (device.address != pendingPairAddress) return
+                    when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
+                        BluetoothDevice.BOND_BONDING -> _pairingStatus.value =
+                            "Confirm the pairing code on the phone and on the TV"
+                        BluetoothDevice.BOND_BONDED -> {
+                            _pairingStatus.value = "Paired. Connecting the remote…"
+                            connectToDevice(device)
+                        }
+                        BluetoothDevice.BOND_NONE -> {
+                            pendingPairAddress = null
+                            _pairingStatus.value = "Pairing was cancelled or refused. Tap the TV to try again."
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun Intent.device(): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
+
+    fun hasScanPermission(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+
+    /** Scans for nearby Bluetooth devices. Paired devices are listed straight away. */
+    fun startScan() {
+        val adapter = bluetoothAdapter ?: return
+        if (!hasBluetoothPermission() || !adapter.isEnabled) {
+            _pairingStatus.value = "Turn Bluetooth on and allow the permission"
+            return
+        }
+        if (!hasScanPermission()) {
+            _pairingStatus.value = "Allow the nearby devices permission, then search again"
+            return
+        }
+        if (!receiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            }
+            ContextCompat.registerReceiver(context, scanReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+            receiverRegistered = true
+        }
+        userPicked = false
+        refreshPairedDevices()
+        _foundDevices.value = _pairedDevices.value
+        _pairingStatus.value = "Searching for your TV…"
+        try {
+            adapter.cancelDiscovery()
+            _isScanning.value = adapter.startDiscovery()
+            if (!_isScanning.value) _pairingStatus.value = "Could not start the search. Try again."
+        } catch (e: Exception) {
+            Log.e(TAG, "startDiscovery failed", e)
+            _pairingStatus.value = "Could not start the search: ${e.localizedMessage}"
+        }
+    }
+
+    fun stopScan() {
+        try {
+            if (hasScanPermission()) bluetoothAdapter?.cancelDiscovery()
+        } catch (e: Exception) {
+            Log.w(TAG, "cancelDiscovery failed", e)
+        }
+        _isScanning.value = false
+    }
+
+    private fun addFound(item: PairedTvDevice) {
+        val list = _foundDevices.value.filterNot { it.address == item.address } + item
+        _foundDevices.value = list.sortedWith(
+            compareByDescending<PairedTvDevice> { it.isLikelyTv }
+                .thenByDescending { it.isBonded }
+                .thenBy { it.name.lowercase() }
+        )
+    }
+
+    /** If the search found exactly one TV and the user has not chosen, connect to it. */
+    private fun autoPickSingleTv() {
+        if (userPicked || pendingPairAddress != null || connectedDevice != null) return
+        val tvs = _foundDevices.value.filter { it.isLikelyTv }
+        val only = tvs.singleOrNull()
+        if (only == null) {
+            _pairingStatus.value = if (tvs.isEmpty()) {
+                "No TV found. On the TV open Settings → Remotes & Accessories → Add accessory, then search again."
+            } else {
+                "Several TVs found. Tap yours."
+            }
+            return
+        }
+        pairWith(only)
+    }
+
+    /** Pairs with [item] (if needed) and links the remote to it. */
+    fun pairWith(item: PairedTvDevice) {
+        userPicked = true
+        pendingPairAddress = item.address
+        stopScan()
+        val device = item.rawDevice
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            _pairingStatus.value = "Connecting to ${item.name}…"
+            connectToDevice(device)
+        } else {
+            _pairingStatus.value = "Pairing with ${item.name}…"
+            if (!device.createBond()) {
+                _pairingStatus.value = "Could not start pairing with ${item.name}"
+            }
+        }
+    }
+
+    private fun toListItem(device: BluetoothDevice, bonded: Boolean): PairedTvDevice {
+        val name = resolveDeviceName(device)
+        return PairedTvDevice(
+            name = name,
+            address = device.address,
+            isLikelyTv = looksLikeTv(device, name),
+            rawDevice = device,
+            isBonded = bonded
+        )
+    }
+
+    /** TV-like Bluetooth class, or a name that says TV / Mi / Xiaomi. Headphones never count. */
+    private fun looksLikeTv(device: BluetoothDevice, name: String): Boolean {
+        val deviceClass = try {
+            device.bluetoothClass?.deviceClass
+        } catch (e: Exception) {
+            null
+        }
+        val tvClasses = setOf(
+            BluetoothClass.Device.AUDIO_VIDEO_SET_TOP_BOX,
+            BluetoothClass.Device.AUDIO_VIDEO_VIDEO_MONITOR,
+            BluetoothClass.Device.AUDIO_VIDEO_VIDEO_DISPLAY_AND_LOUDSPEAKER
+        )
+        if (deviceClass != null && deviceClass in tvClasses) return true
+        return TV_NAME.containsMatchIn(name)
+    }
+
     fun getPreferredTargetDevice(): BluetoothDevice? = connectedDevice ?: lastTargetDevice
 
     private fun resolveDeviceName(device: BluetoothDevice?): String {
@@ -669,6 +821,15 @@ class BluetoothRemoteController(private val context: Context) {
      * Unregisters the HID app and closes the Bluetooth profile proxy on cleanup.
      */
     fun release() {
+        stopScan()
+        if (receiverRegistered) {
+            try {
+                context.unregisterReceiver(scanReceiver)
+            } catch (e: Exception) {
+                Log.w(TAG, "unregister receiver failed", e)
+            }
+            receiverRegistered = false
+        }
         ble.release()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {

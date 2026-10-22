@@ -70,11 +70,13 @@
     <string name="voice_permission_required">Microphone permission is required to speak TV searches.</string>
     <string name="voice_recognized_query_hint">Recognized query will appear here…</string>
     <!-- Direct Connect & Joystick -->
-    <string name="direct_connect_btn">Direct Connect</string>
+    <string name="direct_connect_btn">Find TV</string>
     <string name="direct_connect_active">Connecting to Mi TV…</string>
-    <string name="direct_connect_hint">TV वर उघडा: Settings → Remotes &amp; Accessories → Add accessory. TV वर "MI RC" नाव दिसलं की ते निवडा आणि Pair दाबा. (Pairing च्या वेळी फोनचं Bluetooth नाव थोडा वेळ MI RC होतं, नंतर आपोआप परत येतं.) हे फक्त पहिल्यांदा करायचं आहे.</string>
     <string name="nav_mode_dpad_label">D-Pad Arrows</string>
     <string name="nav_mode_joystick_label">Joystick / Pad</string>
-    <string name="dual_button_pair_tooltip">फोन TV जवळ ठेवा • pairing 2 मिनिटं चालू राहील</string>
     <string name="direct_paired_success">Mi TV Connected Directly</string>
+    <string name="find_tv_title">Find your TV</string>
+    <string name="find_tv_steps">1. Turn the TV on.\n2. On the TV open Settings → Remotes &amp; Accessories → Add accessory.\n3. Tap your TV in the list below. Confirm the pairing code on the phone and the TV.</string>
+    <string name="find_tv_search_again">Search again</string>
+    <string name="find_tv_open_settings">Open phone Bluetooth settings</string>
 </resources>

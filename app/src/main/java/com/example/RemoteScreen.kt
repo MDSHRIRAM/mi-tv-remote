@@ -155,6 +155,9 @@ fun RemoteScreen(
     val isSdpRegistered by btController.isSdpRegistered.collectAsStateWithLifecycle()
     val lastActionLog by btController.lastActionLog.collectAsStateWithLifecycle()
     val isDirectPairingActive by btController.isDirectPairingActive.collectAsStateWithLifecycle()
+    val foundDevices by btController.foundDevices.collectAsStateWithLifecycle()
+    val isScanning by btController.isScanning.collectAsStateWithLifecycle()
+    val pairingStatus by btController.pairingStatus.collectAsStateWithLifecycle()
 
     val hasIrHardware = remember { irHelper.hasIrEmitter() }
     var controlMode by remember { mutableStateOf(ControlModeStore.load(context, hasIrHardware)) }
@@ -190,7 +193,7 @@ fun RemoteScreen(
             if (btController.reconnectKnownTv()) {
                 btController.updateActionLog("$label pressed • Connecting to TV…")
             } else {
-                btController.updateActionLog("$label • Tap 'Direct Connect' to link TV")
+                btController.updateActionLog("$label • Tap 'Find TV' to link your TV")
             }
         }
     }
@@ -204,7 +207,7 @@ fun RemoteScreen(
             return
         }
         val btInitiated = btController.wakeAndPowerToggle()
-        if (!btInitiated) btController.updateActionLog("Power • Tap 'Direct Connect' to link TV")
+        if (!btInitiated) btController.updateActionLog("Power • Tap 'Find TV' to link your TV")
     }
 
     MyApplicationTheme(
@@ -497,15 +500,25 @@ fun RemoteScreen(
             }
         }
 
-        // Direct Pairing Beacon Animation Overlay
+        // Find your TV
         if (isDirectPairingActive) {
-            DirectPairingOverlay(
-                onDismiss = { btController.dismissDirectPairing() },
-                onClassicPairing = {
-                    // Fallback: make the phone visible to classic Bluetooth scans for 2 minutes.
-                    btController.updateActionLog("Classic pairing • allow 'visible' on the phone")
-                    onRequestDiscoverable()
-                }
+            FindTvDialog(
+                devices = foundDevices,
+                isScanning = isScanning,
+                status = pairingStatus,
+                connectedAddress = (connectionState as? HidConnectionState.Connected)?.address,
+                onSearchAgain = {
+                    if (!btController.hasScanPermission()) onRequestPermissions()
+                    btController.startScan()
+                },
+                onPick = { btController.pairWith(it) },
+                onOpenBluetoothSettings = {
+                    context.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                },
+                onDismiss = { btController.dismissDirectPairing() }
             )
         }
 
@@ -631,7 +644,7 @@ private fun MinimalTopBar(
                     text = when (connectionState) {
                         is HidConnectionState.Connected -> connectionState.deviceName
                         is HidConnectionState.Connecting -> "Connecting…"
-                        else -> if (isDirectPairingActive) "Pairing…" else "Direct Pair Ready"
+                        else -> if (isDirectPairingActive) "Pairing…" else "Tap Find TV"
                     },
                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                     color = if (isConnected) palette.primaryAccent else TextSecondarySlate,

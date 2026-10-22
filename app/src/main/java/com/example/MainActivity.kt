@@ -108,6 +108,8 @@ class MainActivity : ComponentActivity() {
                                     Manifest.permission.BLUETOOTH_ADVERTISE
                                 )
                             )
+                        } else {
+                            permissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION))
                         }
                     },
                     onRequestAudioPermission = {
