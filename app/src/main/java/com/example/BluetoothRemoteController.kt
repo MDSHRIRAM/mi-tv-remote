@@ -60,6 +60,9 @@ class BluetoothRemoteController(private val context: Context) {
         const val SDP_DESCRIPTION = "Xiaomi Mi TV Bluetooth HID Remote & Keyboard"
         const val SDP_PROVIDER = "Android"
         private const val KEY_HOLD_DELAY_MS = 30L
+        private const val PAIRING_WINDOW_MS = 120_000L
+        private const val RECONNECT_WINDOW_MS = 30_000L
+        private const val WAKE_WINDOW_MS = 45_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -89,37 +92,96 @@ class BluetoothRemoteController(private val context: Context) {
     private val _isDirectPairingActive = MutableStateFlow(false)
     val isDirectPairingActive: StateFlow<Boolean> = _isDirectPairingActive.asStateFlow()
 
-    fun startDirectTvConnect(irHelper: IrBlasterHelper? = null) {
-        scope.launch {
-            _isDirectPairingActive.value = true
-            _lastActionLog.value = "Direct Pairing Mi TV • Hold phone near TV (within 20cm)"
-            irHelper?.transmitPowerWake()
+    private val _isBleAdvertising = MutableStateFlow(false)
+    val isBleAdvertising: StateFlow<Boolean> = _isBleAdvertising.asStateFlow()
 
-            if (hasBluetoothPermission()) {
-                initialize()
-                refreshPairedDevices()
+    // ------------------------------------------------------------ BLE remote (main path)
 
-                val target = lastTargetDevice
-                    ?: _pairedDevices.value.firstOrNull { it.isLikelyTv }?.rawDevice
-                    ?: _pairedDevices.value.firstOrNull()?.rawDevice
-
-                if (target != null) {
-                    connectToDevice(target)
-                } else {
-                    try {
-                        bluetoothAdapter?.startDiscovery()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Bluetooth discovery error", e)
-                    }
-                }
-            }
-            delay(3500L)
+    private val bleListener = object : BleHidPeripheral.Listener {
+        override fun onHostConnected(device: BluetoothDevice) {
+            val name = resolveDeviceName(device)
+            _connectionState.value = HidConnectionState.Connected("$name • BLE", device.address)
+            _lastActionLog.value = "Connected to $name (Bluetooth LE)"
             _isDirectPairingActive.value = false
         }
+
+        override fun onHostDisconnected(device: BluetoothDevice) {
+            if (connectedDevice == null) {
+                _connectionState.value = HidConnectionState.Disconnected
+            }
+            _lastActionLog.value = "TV disconnected • it reconnects when you press a button"
+        }
+
+        override fun onAdvertisingChanged(active: Boolean) {
+            _isBleAdvertising.value = active
+        }
+
+        override fun onAdvertiseFailed(unsupported: Boolean) {
+            _isDirectPairingActive.value = false
+            if (unsupported) {
+                _lastActionLog.value = "This phone cannot act as a BLE remote • use Classic pairing"
+            }
+        }
+
+        override fun onLog(message: String) {
+            _lastActionLog.value = message
+        }
+    }
+
+    private val ble = BleHidPeripheral(context, bleListener)
+
+    /** True when a TV is linked over Bluetooth LE. */
+    val isBleLinked: Boolean get() = ble.isHostConnected
+
+    /** True once a TV has bonded with the BLE remote at least once. */
+    val hasBleTv: Boolean get() = ble.savedHostAddress != null
+
+    /**
+     * Pairing mode: the phone advertises as a Bluetooth remote for 2 minutes. On the TV open
+     * Settings → Remotes & Accessories → Add accessory and pick the phone. A TV that paired
+     * before reconnects by itself.
+     */
+    fun startDirectTvConnect() {
+        if (!hasBluetoothPermission()) return
+        initialize()
+        if (ble.isHostConnected) {
+            _lastActionLog.value = "Already connected"
+            return
+        }
+        ble.startAdvertising(PAIRING_WINDOW_MS)
+        _isDirectPairingActive.value = true
+        _lastActionLog.value = "Pairing on • TV: Remotes & Accessories → Add accessory"
+        scope.launch {
+            delay(PAIRING_WINDOW_MS)
+            _isDirectPairingActive.value = false
+        }
+        // A TV paired earlier over classic Bluetooth can still be linked that way.
+        val classicAddr = prefs.getString(KEY_LAST_DEVICE_ADDRESS, null)
+        val classicTarget = _pairedDevices.value.firstOrNull { it.address == classicAddr }?.rawDevice
+        if (classicTarget != null && connectedDevice == null) connectToDevice(classicTarget)
     }
 
     fun dismissDirectPairing() {
         _isDirectPairingActive.value = false
+        if (!ble.isHostConnected) ble.stopAdvertising()
+    }
+
+    /** A button was pressed while no TV is linked: call the known TV back. */
+    fun reconnectKnownTv(): Boolean {
+        if (!hasBluetoothPermission()) return false
+        if (hasBleTv) {
+            initialize()
+            ble.startAdvertising(RECONNECT_WINDOW_MS)
+            _lastActionLog.value = "Reconnecting to TV…"
+            return true
+        }
+        val target = getPreferredTargetDevice() ?: return false
+        return connectToDevice(target)
+    }
+
+    /** Forget the BLE TV (used when the user wants to pair a different TV). */
+    fun forgetBleTv() {
+        ble.forgetHost()
     }
 
     fun hasBluetoothPermission(): Boolean {
@@ -181,6 +243,7 @@ class BluetoothRemoteController(private val context: Context) {
                         _lastActionLog.value = "Connected to $safeName via Bluetooth HID"
                     }
                     BluetoothProfile.STATE_CONNECTING -> {
+                        if (ble.isHostConnected) return
                         _connectionState.value = HidConnectionState.Connecting(safeName, safeAddr)
                         _lastActionLog.value = "Connecting to $safeName…"
                     }
@@ -188,8 +251,10 @@ class BluetoothRemoteController(private val context: Context) {
                         if (connectedDevice?.address == device?.address) {
                             connectedDevice = null
                         }
-                        _connectionState.value = HidConnectionState.Disconnected
-                        _lastActionLog.value = "Disconnected from $safeName"
+                        if (!ble.isHostConnected) {
+                            _connectionState.value = HidConnectionState.Disconnected
+                            _lastActionLog.value = "Disconnected from $safeName"
+                        }
                     }
                 }
             }
@@ -221,10 +286,6 @@ class BluetoothRemoteController(private val context: Context) {
      * Initializes the Bluetooth HID Device profile proxy and registers the SDP record.
      */
     fun initialize() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            _lastActionLog.value = "Bluetooth HID requires Android 9.0 (API 28+)"
-            return
-        }
         if (!hasBluetoothPermission()) {
             _lastActionLog.value = "Waiting for Bluetooth permission…"
             return
@@ -235,9 +296,17 @@ class BluetoothRemoteController(private val context: Context) {
             return
         }
         if (!adapter.isEnabled) {
-            _lastActionLog.value = "Bluetooth is turned off • Using IR Standby Mode"
+            _lastActionLog.value = "Bluetooth is turned off"
             return
         }
+        // BLE remote (works from Android 5). If a TV paired before, let it reconnect.
+        if (hasBleTv && !ble.isHostConnected && !_isBleAdvertising.value) {
+            ble.startAdvertising(RECONNECT_WINDOW_MS)
+        } else {
+            ble.start()
+        }
+        // Classic Bluetooth remote needs Android 9.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         if (hidDevice != null && _isSdpRegistered.value) {
             return
         }
@@ -368,7 +437,12 @@ class BluetoothRemoteController(private val context: Context) {
         modifier: Int = HidDescriptor.MODIFIER_NONE,
         actionLabel: String? = null
     ): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !hasBluetoothPermission()) return false
+        if (!hasBluetoothPermission()) return false
+        if (ble.sendKey(reportId, keyCode, modifier)) {
+            _lastActionLog.value = actionLabel ?: "Sent key 0x${keyCode.toString(16).uppercase()}"
+            return true
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
         val hid = hidDevice ?: return false
         val target = connectedDevice ?: return false
 
@@ -400,12 +474,46 @@ class BluetoothRemoteController(private val context: Context) {
      *    followed by Consumer Control Power (`0x0030` on Report ID 2).
      */
     fun wakeAndPowerToggle(explicitDevice: BluetoothDevice? = null): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !hasBluetoothPermission()) return false
+        if (!hasBluetoothPermission()) return false
+
+        // BLE linked = TV is on: Power turns it off.
+        if (ble.isHostConnected) {
+            ble.sendKey(HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.CONSUMER_POWER)
+            _lastActionLog.value = "Power • sent by Bluetooth LE"
+            return true
+        }
+        // BLE TV known but not linked = TV is probably in standby. Advertise like the official
+        // remote does when a key is pressed; if the TV wakes and reconnects, send wake-up keys.
+        if (hasBleTv) {
+            ble.onNextHostConnect = {
+                ble.sendKey(HidDescriptor.REPORT_ID_SYSTEM, HidDescriptor.SYSTEM_WAKE_UP)
+                ble.sendKey(HidDescriptor.REPORT_ID_CONSUMER, HidDescriptor.CONSUMER_SYSTEM_WAKE)
+                _lastActionLog.value = "TV reconnected • wake-up sent"
+            }
+            ble.startAdvertising(WAKE_WINDOW_MS)
+            _connectionState.value = HidConnectionState.Connecting("TV", ble.savedHostAddress ?: "")
+            _lastActionLog.value = "Power • calling the TV over Bluetooth LE…"
+            scope.launch {
+                delay(WAKE_WINDOW_MS)
+                if (!ble.isHostConnected && connectedDevice == null) {
+                    _connectionState.value = HidConnectionState.Disconnected
+                    _lastActionLog.value = "TV did not answer • see README (standby wake)"
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return hasBleTv
         val hid = hidDevice ?: run {
             initialize()
-            return false
+            return hasBleTv
         }
-        val target = explicitDevice ?: connectedDevice ?: lastTargetDevice
+        // With a BLE TV known, only use classic for a TV that was really linked over classic.
+        val classicAddr = prefs.getString(KEY_LAST_DEVICE_ADDRESS, null)
+        val target = explicitDevice ?: connectedDevice ?: if (hasBleTv) {
+            _pairedDevices.value.firstOrNull { it.address == classicAddr }?.rawDevice
+        } else {
+            lastTargetDevice
+        }
+        if (target == null) return hasBleTv
 
         // Already linked = TV is on, so Power means "turn off". Not linked = TV is
         // probably in standby, so only send wake codes (a Power toggle right after
@@ -488,7 +596,17 @@ class BluetoothRemoteController(private val context: Context) {
      * Types a full text string on the Mi TV by sending sequential USB HID Keyboard reports.
      */
     fun sendTextString(text: String, sendEnterAfter: Boolean = false) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !hasBluetoothPermission()) return
+        if (!hasBluetoothPermission()) return
+        if (ble.isHostConnected) {
+            for (ch in text) {
+                val (modifier, keyCode) = HidDescriptor.charToHidKey(ch) ?: continue
+                ble.sendKey(HidDescriptor.REPORT_ID_KEYBOARD, keyCode, modifier)
+            }
+            if (sendEnterAfter) ble.sendKey(HidDescriptor.REPORT_ID_KEYBOARD, HidDescriptor.KEY_ENTER_OK)
+            _lastActionLog.value = "Typed \"${text.take(22)}\" via Bluetooth LE"
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         val hid = hidDevice ?: return
         val target = connectedDevice ?: return
 
@@ -546,6 +664,7 @@ class BluetoothRemoteController(private val context: Context) {
      * Unregisters the HID app and closes the Bluetooth profile proxy on cleanup.
      */
     fun release() {
+        ble.release()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
                 hidDevice?.let { hid ->

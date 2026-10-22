@@ -1,6 +1,8 @@
 package com.example
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -54,6 +56,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val discoverableLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) { }
+
                 val audioPermissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { isGranted ->
@@ -106,6 +112,15 @@ class MainActivity : ComponentActivity() {
                     },
                     onRequestAudioPermission = {
                         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    onRequestDiscoverable = {
+                        try {
+                            discoverableLauncher.launch(
+                                Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)
+                            )
+                        } catch (_: Exception) {
+                        }
                     }
                 )
             }

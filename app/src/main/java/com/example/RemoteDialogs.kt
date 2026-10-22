@@ -90,7 +90,8 @@ import com.example.ui.theme.TextSecondarySlate
  */
 @Composable
 fun DirectPairingOverlay(
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onClassicPairing: () -> Unit = {}
 ) {
     val palette = LocalRemotePalette.current
     val accentColor = MaterialTheme.colorScheme.primary
@@ -132,7 +133,7 @@ fun DirectPairingOverlay(
                     tint = accentColor
                 )
                 Text(
-                    text = "Mi TV Direct Connect",
+                    text = "TV शी जोडा",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -195,7 +196,12 @@ fun DirectPairingOverlay(
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Text("OK")
+                Text("ठीक")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onClassicPairing) {
+                Text("TV वर फोन दिसत नाही?", color = TextSecondarySlate)
             }
         }
     )

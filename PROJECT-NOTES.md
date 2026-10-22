@@ -9,7 +9,9 @@
 
 ## Phases
 1. **Done — v1.0.0.** Build fixed, Bluetooth / IR mode switch, Power sends one signal only, release signing, public repo + release.
-2. **Next.** Turn the app into a **Bluetooth Low Energy (BLE) HID remote** like the official one (HID over GATT). Add "Connect to TV" that advertises like a remote so the TV can pair it once. Then test Power-on from standby. Experimental: depends on whether the TV accepts the phone like its own remote.
+2. **Built — v1.1.0, waiting for the owner's TV test.** BLE HID remote (`BleHidPeripheral.kt`, HID over GATT). Direct Connect advertises for 2 min; the TV pairs it once from Add accessory; afterwards it reconnects when the app advertises (on app start/resume, on key press). Power with the TV in standby advertises for 45 s and sends System Wake when the TV reconnects. Classic HID stays as fallback ("TV वर फोन दिसत नाही?" makes the phone discoverable). Keys go over BLE first, classic second.
+   - Not verified on a real TV yet. Emulator: pairing advertising starts fine, no crash.
+   - If the TV lists the phone but refuses it, or does not wake: next ideas are adding the Appearance "remote control" via a different advertising API, and copying the official remote's advertising format (needs the TV model).
 3. Correct Xiaomi IR codes (current codes are LG NEC codes and will not work on Mi TV) + a "find my TV" screen to try code sets.
 4. Test on other Android TVs, final release.
 

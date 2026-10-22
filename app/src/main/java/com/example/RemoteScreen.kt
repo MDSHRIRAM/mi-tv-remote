@@ -144,6 +144,7 @@ fun RemoteScreen(
     hasAudioPermission: Boolean,
     onRequestPermissions: () -> Unit,
     onRequestAudioPermission: () -> Unit,
+    onRequestDiscoverable: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -186,9 +187,7 @@ fun RemoteScreen(
             actionLabel = label
         )
         if (!btSent) {
-            val preferred = btController.getPreferredTargetDevice()
-            if (preferred != null) {
-                btController.connectToDevice(preferred)
+            if (btController.reconnectKnownTv()) {
                 btController.updateActionLog("$label pressed • Connecting to TV…")
             } else {
                 btController.updateActionLog("$label • Tap 'Direct Connect' to link TV")
@@ -205,9 +204,7 @@ fun RemoteScreen(
             return
         }
         val btInitiated = btController.wakeAndPowerToggle()
-        btController.updateActionLog(
-            if (btInitiated) "Power • sent by Bluetooth" else "Power • Tap 'Direct Connect' to link TV"
-        )
+        if (!btInitiated) btController.updateActionLog("Power • Tap 'Direct Connect' to link TV")
     }
 
     MyApplicationTheme(
@@ -503,7 +500,12 @@ fun RemoteScreen(
         // Direct Pairing Beacon Animation Overlay
         if (isDirectPairingActive) {
             DirectPairingOverlay(
-                onDismiss = { btController.dismissDirectPairing() }
+                onDismiss = { btController.dismissDirectPairing() },
+                onClassicPairing = {
+                    // Fallback: make the phone visible to classic Bluetooth scans for 2 minutes.
+                    btController.updateActionLog("Classic pairing • allow 'visible' on the phone")
+                    onRequestDiscoverable()
+                }
             )
         }
 
