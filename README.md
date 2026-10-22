@@ -21,7 +21,7 @@ Each version has its own file name, e.g. `MiTVRemote-v1.0.0.apk`. A newer versio
 
 ## Power-on from standby (experimental)
 
-With the TV in standby (mains switch on, TV off), open the app and press **Power**. The phone calls the TV over Bluetooth LE for 45 seconds, the same way the official remote does. If the TV wakes and reconnects, the app sends the wake-up key. Whether the TV accepts this from a phone depends on the TV model. On phones with an IR emitter, IR mode can always switch the TV on.
+With the TV in standby (mains switch on, TV off), open the app and press **Power**. The phone calls the TV over Bluetooth LE for 45 seconds, the same way the official remote does. If the TV wakes and reconnects, the app sends the wake-up key. Whether the TV accepts this from a phone depends on the TV model. IR mode will be the sure way to switch the TV on once the correct Xiaomi IR codes are added (planned).
 
 ## Status
 
